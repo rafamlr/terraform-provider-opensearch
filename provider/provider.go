@@ -26,6 +26,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 
 	elastic7 "github.com/olivere/elastic/v7"
+	"github.com/opensearch-project/opensearch-go/v2"
 )
 
 type ServerFlavor int64
@@ -69,6 +70,9 @@ type ProviderConf struct {
 	proxy                   string
 	// determined after connecting to the server
 	flavor ServerFlavor
+
+	// official OpenSearch client
+	osClient *opensearch.Client
 }
 
 func Provider() *schema.Provider {
@@ -246,6 +250,9 @@ func Provider() *schema.Provider {
 			"opensearch_channel_configuration":     resourceOpenSearchChannelConfiguration(),
 			"opensearch_anomaly_detection":         resourceOpenSearchAnomalyDetection(),
 			"opensearch_sm_policy":                 resourceOpenSearchSMPolicy(),
+			"opensearch_ml_connector":              resourceOpensearchMLConnector(),
+			"opensearch_ml_model_group":            resourceOpensearchMLModelGroup(),
+			"opensearch_ml_model":                  resourceOpensearchMLModel(),
 		},
 
 		DataSourcesMap: map[string]*schema.Resource{
@@ -263,7 +270,7 @@ func providerConfigure(c context.Context, d *schema.ResourceData) (interface{}, 
 		return nil, diag.FromErr(err)
 	}
 
-	return &ProviderConf{
+	conf := &ProviderConf{
 		rawUrl:             rawUrl,
 		insecure:           d.Get("insecure").(bool),
 		sniffing:           d.Get("sniff").(bool),
@@ -290,7 +297,90 @@ func providerConfigure(c context.Context, d *schema.ResourceData) (interface{}, 
 		keyPemPath:              d.Get("client_key_path").(string),
 		hostOverride:            d.Get("host_override").(string),
 		proxy:                   d.Get("proxy").(string),
-	}, nil
+	}
+
+	osClient, err := getOSClient(conf)
+	if err != nil {
+		return nil, diag.FromErr(err)
+	}
+	conf.osClient = osClient
+
+	return conf, nil
+}
+
+func getOSClient(conf *ProviderConf) (*opensearch.Client, error) {
+	cfg := opensearch.Config{
+		Addresses: []string{conf.rawUrl},
+	}
+
+	if conf.username != "" && conf.password != "" {
+		cfg.Username = conf.username
+		cfg.Password = conf.password
+	} else if conf.parsedUrl.User.Username() != "" {
+		cfg.Username = conf.parsedUrl.User.Username()
+		if p, ok := conf.parsedUrl.User.Password(); ok {
+			cfg.Password = p
+		}
+	}
+
+	httpClient, err := createOSHttpClient(conf)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.Transport = httpClient.Transport
+
+	return opensearch.NewClient(cfg)
+}
+
+func createOSHttpClient(conf *ProviderConf) (*http.Client, error) {
+	if !conf.signAWSRequests {
+		return createNonAWSHttpClient(conf), nil
+	}
+
+	if m := awsUrlRegexp.FindStringSubmatch(conf.parsedUrl.Hostname()); m != nil {
+		return awsHttpClient(m[1], conf, map[string]string{})
+	}
+
+	if m := awsOpensearchServerlessUrlRegexp.FindStringSubmatch(conf.parsedUrl.Hostname()); m != nil {
+		client, err := awsHttpClient(m[1], conf, map[string]string{})
+		if err != nil {
+			return nil, err
+		}
+		client.Transport = Wrap(client.Transport)
+		return client, nil
+	}
+
+	if conf.awsSig4Service == "aoss" && conf.awsRegion != "" {
+		client, err := awsHttpClient(conf.awsRegion, conf, map[string]string{})
+		if err != nil {
+			return nil, err
+		}
+		client.Transport = Wrap(client.Transport)
+		return client, nil
+	}
+
+	if conf.awsRegion != "" {
+		return awsHttpClient(conf.awsRegion, conf, map[string]string{})
+	}
+
+	return createNonAWSHttpClient(conf), nil
+}
+
+func createNonAWSHttpClient(conf *ProviderConf) *http.Client {
+	if conf.insecure || conf.cacertFile != "" {
+		client := tlsHttpClient(conf, map[string]string{})
+		if conf.token != "" {
+			return tokenHttpClient(conf, map[string]string{})
+		}
+		return client
+	}
+
+	if conf.token != "" {
+		return tokenHttpClient(conf, map[string]string{})
+	}
+
+	return defaultHttpClient(conf, map[string]string{})
 }
 
 func getClient(conf *ProviderConf) (*elastic7.Client, error) {
