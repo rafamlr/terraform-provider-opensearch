@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,9 +17,9 @@ import (
 )
 
 const (
-	maxModelRegistrationAttempts  = 60
+	maxModelRegistrationWait      = 120 * time.Second
 	modelRegistrationPollInterval = 2 * time.Second
-	maxModelDeploymentAttempts    = 60
+	maxModelDeploymentWait        = 120 * time.Second
 	modelDeploymentPollInterval   = 2 * time.Second
 )
 
@@ -869,8 +870,41 @@ func buildModelConfigPayload(modelConfigMap map[string]interface{}) map[string]i
 }
 
 func deployMLModel(ctx context.Context, conf *ProviderConf, modelID string) error {
-	if _, err := performRequestAndParse(ctx, conf.osClient, "POST", conf.rawUrl+fmt.Sprintf("/_plugins/_ml/models/%s/_deploy", modelID), nil, "deploy ML Model"); err != nil {
+	state, err := deployAndWaitForModel(ctx, conf, modelID)
+	if err != nil {
 		return err
+	}
+	if state == "DEPLOYED" {
+		return nil
+	}
+
+	// OpenSearch sometimes settles into PARTIALLY_DEPLOYED (deployed to some nodes
+	// but not all) or UNDEPLOYED (drifted out of DEPLOYED) instead of DEPLOYED.
+	// Retry once: for PARTIALLY_DEPLOYED the model is undeployed first; for UNDEPLOYED a
+	// plain redeploy is enough.
+	log.Printf("[INFO] ML Model %s reached state %s instead of DEPLOYED; retrying deployment once", modelID, state)
+
+	if state == "PARTIALLY_DEPLOYED" {
+		log.Printf("[INFO] Undeploying ML Model %s before redeploy retry", modelID)
+		if err := undeployMLModel(ctx, conf, modelID); err != nil {
+			return fmt.Errorf("failed to undeploy ML Model %s before redeploy retry: %w", modelID, err)
+		}
+	}
+
+	log.Printf("[INFO] Redeploying ML Model %s", modelID)
+	state, err = deployAndWaitForModel(ctx, conf, modelID)
+	if err != nil {
+		return err
+	}
+	if state != "DEPLOYED" {
+		return fmt.Errorf("ML Model %s did not reach DEPLOYED state after retry; final state: %s", modelID, state)
+	}
+	return nil
+}
+
+func deployAndWaitForModel(ctx context.Context, conf *ProviderConf, modelID string) (string, error) {
+	if _, err := performRequestAndParse(ctx, conf.osClient, "POST", conf.rawUrl+fmt.Sprintf("/_plugins/_ml/models/%s/_deploy", modelID), nil, "deploy ML Model"); err != nil {
+		return "", err
 	}
 
 	return waitForModelDeployment(ctx, conf.osClient, conf.rawUrl, modelID)
@@ -897,7 +931,8 @@ func undeployMLModel(ctx context.Context, conf *ProviderConf, modelID string) er
 func waitForModelRegistrationTask(ctx context.Context, client *opensearch.Client, baseURL, taskID string) (string, error) {
 	url := baseURL + fmt.Sprintf("/_plugins/_ml/tasks/%s", taskID)
 
-	for i := 0; i < maxModelRegistrationAttempts; i++ {
+	deadline := time.Now().Add(maxModelRegistrationWait)
+	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
 			return "", fmt.Errorf("context cancelled while waiting for ML Model registration: %w", ctx.Err())
@@ -923,28 +958,30 @@ func waitForModelRegistrationTask(ctx context.Context, client *opensearch.Client
 		time.Sleep(modelRegistrationPollInterval)
 	}
 
-	return "", fmt.Errorf("timeout waiting for ML Model registration task to complete after %d attempts (%d seconds)", maxModelRegistrationAttempts, int(modelRegistrationPollInterval.Seconds())*maxModelRegistrationAttempts)
+	return "", fmt.Errorf("timeout waiting for ML Model registration task to complete after %s seconds", maxModelRegistrationWait)
 }
 
-func waitForModelDeployment(ctx context.Context, client *opensearch.Client, baseURL, modelID string) error {
+func waitForModelDeployment(ctx context.Context, client *opensearch.Client, baseURL, modelID string) (string, error) {
 	url := baseURL + fmt.Sprintf("/_plugins/_ml/models/%s", modelID)
 
-	for i := 0; i < maxModelDeploymentAttempts; i++ {
+	deadline := time.Now().Add(maxModelDeploymentWait)
+	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("context cancelled while waiting for ML Model deployment: %w", ctx.Err())
+			return "", fmt.Errorf("context cancelled while waiting for ML Model deployment: %w", ctx.Err())
 		default:
 		}
 
 		result, err := performRequestAndParse(ctx, client, "GET", url, nil, "get ML Model status")
 		if err != nil {
-			return err
+			return "", err
 		}
 
 		modelState, _ := result["model_state"].(string)
-		if modelState == "DEPLOYED" {
-			return nil
-		} else if modelState == "DEPLOY_FAILED" {
+		switch modelState {
+		case "DEPLOYED", "PARTIALLY_DEPLOYED", "UNDEPLOYED":
+			return modelState, nil
+		case "DEPLOY_FAILED":
 			errorMsg := "unknown error"
 			if errStr, ok := result["error"].(string); ok && errStr != "" {
 				errorMsg = errStr
@@ -953,13 +990,13 @@ func waitForModelDeployment(ctx context.Context, client *opensearch.Client, base
 					errorMsg = reason
 				}
 			}
-			return fmt.Errorf("ML Model deployment failed: %s (model_id: %s, state: %s)", errorMsg, modelID, modelState)
+			return modelState, fmt.Errorf("ML Model deployment failed (model_id: %s, state: %s): %s", modelID, modelState, errorMsg)
 		}
 
 		time.Sleep(modelDeploymentPollInterval)
 	}
 
-	return fmt.Errorf("timeout waiting for ML Model deployment to complete after %d attempts (%d seconds)", maxModelDeploymentAttempts, int(modelDeploymentPollInterval.Seconds())*maxModelDeploymentAttempts)
+	return "", fmt.Errorf("timeout waiting for ML Model deployment to complete after %s seconds", maxModelDeploymentWait)
 }
 
 func extractTaskErrorMessage(taskResult map[string]interface{}) string {
