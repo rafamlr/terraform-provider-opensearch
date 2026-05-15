@@ -3,7 +3,9 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
@@ -93,7 +95,8 @@ func resourceOpensearchMLModelGroupRead(ctx context.Context, d *schema.ResourceD
 
 	modelGroup, err := getMLModelGroupFromAPI(ctx, conf, d.Id())
 	if err != nil {
-		if strings.Contains(err.Error(), "404") {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 			d.SetId("")
 			return nil
 		}
@@ -158,8 +161,9 @@ func resourceOpensearchMLModelGroupDelete(ctx context.Context, d *schema.Resourc
 	url := conf.rawUrl + fmt.Sprintf("/_plugins/_ml/model_groups/%s", d.Id())
 	_, err := performRequestAndParse(ctx, conf.osClient, "DELETE", url, nil, "delete ML Model Group")
 	if err != nil {
+		var httpErr *HTTPError
 		// Ignore 404 errors - resource is already deleted
-		if strings.Contains(err.Error(), "404") {
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 			return nil
 		}
 		return diag.FromErr(err)

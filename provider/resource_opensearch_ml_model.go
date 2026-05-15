@@ -3,7 +3,9 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -57,6 +59,9 @@ func resourceOpensearchMLModel() *schema.Resource {
 				Type:        schema.TypeString,
 				Optional:    true,
 				Description: "For text embedding models, should be set to `\"TEXT_EMBEDDING\"`; for sparse encoding models, to `\"SPARSE_ENCODING\"` or `\"SPARSE_TOKENIZE\"`; for cross-encoder models, to `\"TEXT_SIMILARITY\"`; for question-answering models, to `\"QUESTION_ANSWERING\"`. Required for custom and third-party models",
+				DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+					return strings.EqualFold(old, new)
+				},
 			},
 			"is_enabled": {
 				Type:        schema.TypeBool,
@@ -504,7 +509,8 @@ func resourceOpensearchMLModelRead(ctx context.Context, d *schema.ResourceData, 
 
 	model, err := getMLModelFromAPI(ctx, conf, d.Id())
 	if err != nil {
-		if strings.Contains(err.Error(), "404") {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 			d.SetId("")
 			return nil
 		}
@@ -741,16 +747,14 @@ func resourceOpensearchMLModelDelete(ctx context.Context, d *schema.ResourceData
 	url := conf.rawUrl + fmt.Sprintf("/_plugins/_ml/models/%s", d.Id())
 	_, err := performRequestAndParse(ctx, conf.osClient, "DELETE", url, nil, "delete ML Model")
 	if err != nil {
+		var httpErr *HTTPError
 		// Ignore 404 errors - resource is already deleted
-		if strings.Contains(err.Error(), "404") {
-			d.SetId("")
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
 			return nil
 		}
 		return diag.FromErr(err)
 	}
 
-	// TODO - check this
-	d.SetId("")
 	return nil
 }
 
@@ -875,9 +879,12 @@ func deployMLModel(ctx context.Context, conf *ProviderConf, modelID string) erro
 func undeployMLModel(ctx context.Context, conf *ProviderConf, modelID string) error {
 	_, err := performRequestAndParse(ctx, conf.osClient, "POST", conf.rawUrl+fmt.Sprintf("/_plugins/_ml/models/%s/_undeploy", modelID), nil, "undeploy ML Model")
 	if err != nil {
-		// Ignore errors if model is not found or not deployed (already in desired state)
-		if strings.Contains(err.Error(), "status 404") ||
-			strings.Contains(err.Error(), "not deployed") ||
+		// Ignore errors if model is not found or not deployed (already in desired state).
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			return nil
+		}
+		if strings.Contains(err.Error(), "not deployed") ||
 			strings.Contains(err.Error(), "Model not found") {
 			return nil
 		}

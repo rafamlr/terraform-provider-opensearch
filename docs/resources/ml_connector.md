@@ -13,7 +13,24 @@ OpenSearch ML Connector resource
 ## Example Usage
 
 ```terraform
-# Minimal ML Connector with 'aws_sigv4' protocol
+# Notes on 'aws_sigv4' credentials
+# --------------------------------
+# The 'aws_sigv4' protocol supports two credential forms:
+#
+#   1. IAM Role assumption — credential = { roleArn = "..." }
+#      Works only on AWS-managed OpenSearch deployments (e.g. Amazon
+#      OpenSearch Service) where the cluster has an attached IAM identity
+#      that is allowed to call sts:AssumeRole on the target role.
+#      On self-managed clusters (local Docker, on-prem, etc.) this form is
+#      rejected by ML Commons with "Missing credential".
+#   2. Direct credentials — credential = { access_key, secret_key, session_token }
+#      Works on any OpenSearch deployment. The role must be assumed in advance
+#      and the resulting temporary credentials must be piped to Terraform.
+#
+# The examples below use the 'roleArn' form for brevity; see
+# 'minimal_self_managed_aws_sigv4' for the direct-credential alternative.
+
+# Minimal ML Connector with 'aws_sigv4' protocol (IAM Role — AWS-managed OpenSearch)
 resource "opensearch_ml_connector" "minimal_aws_sigv4" {
   name        = "minimal_aws_sigv4"
   description = "Minimal ML Connector with only the mandatory attributes connecting to AWS Bedrock with an IAM Role"
@@ -21,6 +38,34 @@ resource "opensearch_ml_connector" "minimal_aws_sigv4" {
   protocol    = "aws_sigv4"
   credential = {
     roleArn = "<ARN of IAM Role with permissions to access the AWS Bedrock model>"
+  }
+  parameters = {
+    region       = "eu-west-3"
+    service_name = "bedrock"
+  }
+  actions {
+    action_type = "predict"
+    method      = "POST"
+    url         = "https://bedrock-runtime.$${parameters.region}.amazonaws.com/model/amazon.titan-embed-text-v2:0/invoke"
+    headers     = {
+      Content-Type         = "application/json"
+      x-amz-content-sha256 = "required"
+    }
+    request_body = "{ \"inputText\": \"$${parameters.inputText}\" }"
+  }
+}
+
+# Minimal ML Connector with 'aws_sigv4' protocol using direct credentials
+# (for self-managed clusters that can't perform sts:AssumeRole themselves)
+resource "opensearch_ml_connector" "minimal_self_managed_aws_sigv4" {
+  name        = "self_managed_aws_sigv4"
+  description = "AWS Bedrock connector using pre-assumed temporary credentials"
+  version     = "1"
+  protocol    = "aws_sigv4"
+  credential = {
+    access_key    = "<AWS access key>"
+    secret_key    = "<AWS secret key>"
+    session_token = "<AWS session token>"
   }
   parameters = {
     region       = "eu-west-3"
@@ -58,8 +103,7 @@ resource "opensearch_ml_connector" "minimal_http" {
     method      = "POST"
     url         = "https://$${parameters.endpoint}/v1/completions"
     headers     = {
-      Authorization        = "application/json"
-      x-amz-content-sha256 = "required"
+      Authorization = "Bearer $${credential.openAIKey}"
     }
     request_body = "{ \"model\": \"$${parameters.model}\", \"prompt\": \"$${parameters.prompt}\", \"max_tokens\": \"$${parameters.max_tokens}\", \"temperature\": \"$${parameters.temperature}\" }"
   }

@@ -269,7 +269,7 @@ func TestAccOpensearchMLConnector_WithClientConfig(t *testing.T) {
 					resource.TestCheckResourceAttr("opensearch_ml_connector.with_client_config", "client_config.#", "1"),
 					resource.TestCheckResourceAttr("opensearch_ml_connector.with_client_config", "client_config.0.max_connection", "10"),
 					resource.TestCheckResourceAttr("opensearch_ml_connector.with_client_config", "client_config.0.connection_timeout", "10"),
-					resource.TestCheckResourceAttr("opensearch_ml_connector.with_client_config", "client_config.0.read_timeout", "30000"),
+					resource.TestCheckResourceAttr("opensearch_ml_connector.with_client_config", "client_config.0.read_timeout", "30"),
 					resource.TestCheckResourceAttr("opensearch_ml_connector.with_client_config", "client_config.0.max_retry_times", "2"),
 					resource.TestCheckResourceAttr("opensearch_ml_connector.with_client_config", "client_config.0.retry_backoff_policy", "constant"),
 					resource.TestCheckResourceAttr("opensearch_ml_connector.with_client_config", "client_config.0.retry_backoff_millis", "500"),
@@ -550,7 +550,7 @@ resource "opensearch_ml_connector" "with_client_config" {
   client_config {
     max_connection        = 10
     connection_timeout    = 10
-    read_timeout          = 30000
+    read_timeout          = 30
     max_retry_times       = 2
     retry_backoff_policy  = "constant"
     retry_backoff_millis  = 500

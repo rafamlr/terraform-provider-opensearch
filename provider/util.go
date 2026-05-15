@@ -490,6 +490,19 @@ func readPathOrContent(poc string) (string, bool, error) {
 // ===    HTTP Request Helper Functions     ===
 // ============================================
 
+// HTTPError represents a non-2xx response from the OpenSearch API. Callers can
+// use errors.As to inspect StatusCode and branch on specific status codes
+// (e.g. http.StatusNotFound) without resorting to string matching.
+type HTTPError struct {
+	Operation  string
+	StatusCode int
+	Message    string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("%s failed (status %d): %s", e.Operation, e.StatusCode, e.Message)
+}
+
 // Performs an HTTP request to OpenSearch and parses the JSON response.
 // Handles error checking and returns a structured error message on failure.
 func performRequestAndParse(ctx context.Context, client *opensearch.Client, method, url string, body io.Reader, operation string) (map[string]interface{}, error) {
@@ -512,14 +525,18 @@ func performRequestAndParse(ctx context.Context, client *opensearch.Client, meth
 		return nil, fmt.Errorf("error reading %s response body: %s", operation, err)
 	}
 
+	if res.StatusCode >= 400 {
+		message := string(responseBody)
+		var parsed map[string]interface{}
+		if json.Unmarshal(responseBody, &parsed) == nil {
+			message = extractErrorMessage(parsed)
+		}
+		return nil, &HTTPError{Operation: operation, StatusCode: res.StatusCode, Message: message}
+	}
+
 	var result map[string]interface{}
 	if err := json.Unmarshal(responseBody, &result); err != nil {
 		return nil, fmt.Errorf("error parsing %s response: %s", operation, err)
-	}
-
-	if res.StatusCode >= 400 {
-		errorMsg := extractErrorMessage(result)
-		return nil, fmt.Errorf("%s failed (status %d): %s", operation, res.StatusCode, errorMsg)
 	}
 
 	return result, nil
